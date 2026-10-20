@@ -6,6 +6,7 @@ import { DiffView } from "./diff-view";
 import { CompactPanelToolbar, type CompactPanelActions } from "./file-header";
 import { FileList } from "./file-list";
 import { FileListDrawer } from "./file-list-drawer";
+import { RepoFilterBar } from "./repo-filter-bar";
 import { SendSheet } from "./send-sheet";
 import { useDiffReview } from "./use-diff-review";
 import { displayPathForKey, parsePathKey } from "../shared/paths";
@@ -246,6 +247,10 @@ export function DiffReviewPanel({
   }
 
   const workspace = review.workspace;
+  const emptyMessage =
+    review.repos.length > 0
+      ? "All changed repositories are hidden."
+      : "No unstaged or untracked changes.";
 
   return (
     <View style={styles.root}>
@@ -316,6 +321,12 @@ export function DiffReviewPanel({
           <Text style={styles.error}>{review.progressError} (tap to dismiss)</Text>
         </Pressable>
       ) : null}
+      <RepoFilterBar
+        repos={review.repos}
+        rootLabel={workspace.name}
+        theme={theme}
+        onToggle={review.toggleRepo}
+      />
       <View style={styles.body}>
         {!layout.compact ? (
           <View style={styles.listPane}>
@@ -327,7 +338,7 @@ export function DiffReviewPanel({
             {review.snapshotError ? <Text style={styles.error}>{review.snapshotError}</Text> : null}
             <ScrollView style={styles.paneScroll}>
               {review.files.length === 0 && !review.loadingSnapshot ? (
-                <Text style={styles.muted}>No unstaged or untracked changes.</Text>
+                <Text style={styles.muted}>{emptyMessage}</Text>
               ) : (
                 <FileList
                   files={review.files}
@@ -376,7 +387,7 @@ export function DiffReviewPanel({
             />
           ) : (
             <Text style={styles.muted}>
-              {layout.compact ? "No unstaged or untracked changes." : "Select a file to review."}
+              {layout.compact ? emptyMessage : "Select a file to review."}
             </Text>
           )}
         </View>

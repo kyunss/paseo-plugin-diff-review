@@ -8,6 +8,11 @@ Nested checkouts are found recursively (up to 4 levels): submodules, including t
 `.gitmodules` hides with `ignore = all`, and tracked symlinks that point at another Git
 checkout. Uninitialized submodules are skipped.
 
+When more than one repository has changes, chips above the file list show each one with its
+file count; tap a chip to hide or show that repository. Hidden repositories are saved per
+workspace directory, so every session on the same checkout shares them. Comments on hidden
+files are kept and are not sent.
+
 Requires Paseo `>=0.11.0`. Plugins are unsandboxed: only install sources you trust.
 
 ## Install

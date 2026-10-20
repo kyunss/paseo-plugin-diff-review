@@ -18,6 +18,7 @@ import {
   workspaceHasComments,
 } from "./progress";
 import { treeOrderedFiles } from "./file-tree";
+import { repoKeyOf, summarizeRepos, withToggledRepo } from "./repo-filter";
 import { sendDiffReview, type SendTarget } from "./send-review";
 import {
   diffDiscardRpc,
@@ -43,6 +44,7 @@ const EMPTY_PROGRESS = { status: "unread" as const, lineComments: [] };
 const EMPTY_SETTINGS: ReviewSettingsValues = {
   promptTemplate: "",
   progressByWorkspace: {},
+  hiddenReposByDirectory: {},
   diffTypography: {
     fontSize: DEFAULT_DIFF_FONT_SIZE,
     lineHeight: DEFAULT_DIFF_LINE_HEIGHT,
@@ -50,6 +52,7 @@ const EMPTY_SETTINGS: ReviewSettingsValues = {
   },
 };
 const EMPTY_FILES: Record<string, typeof EMPTY_PROGRESS> = {};
+const NO_HIDDEN_REPOS: string[] = [];
 const DEFAULT_TYPOGRAPHY: DiffTypography = EMPTY_SETTINGS.diffTypography;
 
 export function useDiffReview(workspaceId: string) {
@@ -65,7 +68,7 @@ export function useDiffReview(workspaceId: string) {
   const stage = useRpc(diffStageRpc);
   const discard = useRpc(diffDiscardRpc);
 
-  const [files, setFiles] = useState<DiffFile[]>([]);
+  const [allFiles, setAllFiles] = useState<DiffFile[]>([]);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [loadingSnapshot, setLoadingSnapshot] = useState(false);
   const [selectedPathKey, setSelectedPathKey] = useState<string | null>(null);
@@ -111,6 +114,14 @@ export function useDiffReview(workspaceId: string) {
   const progress = useMemo(
     () => (ready ? workspaceFiles(ready.values, workspaceId) : EMPTY_FILES),
     [ready, workspaceId],
+  );
+  const hiddenRepoList = (cwd && ready?.values.hiddenReposByDirectory[cwd]) || NO_HIDDEN_REPOS;
+  const hiddenRepos = useMemo(() => new Set(hiddenRepoList), [hiddenRepoList]);
+  const repos = useMemo(() => summarizeRepos(allFiles, hiddenRepos), [allFiles, hiddenRepos]);
+  // Everything downstream (counts, navigation, send, stage) sees only the shown repositories.
+  const files = useMemo(
+    () => allFiles.filter((file) => !hiddenRepos.has(repoKeyOf(file))),
+    [allFiles, hiddenRepos],
   );
   const counts = useMemo(() => countProgress({ files, progress }), [files, progress]);
   const selectedFile = useMemo(
@@ -188,18 +199,15 @@ export function useDiffReview(workspaceId: string) {
   const refreshSnapshot = useCallback(async () => {
     if (!cwd) {
       setSnapshotError("Workspace directory unavailable");
-      setFiles([]);
+      setAllFiles([]);
       return;
     }
     setLoadingSnapshot(true);
     try {
       const result = await snapshot({ cwd });
-      setFiles(result.files);
+      setAllFiles(result.files);
       setSnapshotError(result.error);
-      setSelectedPathKey((current) => {
-        if (current && result.files.some((file) => file.pathKey === current)) return current;
-        return result.files[0]?.pathKey ?? null;
-      });
+      // Prune against every changed file so comments on hidden repositories survive.
       const pathKeys = new Set(result.files.map((file) => file.pathKey));
       void saveProgress((values) => {
         const next = pruneWorkspaceProgress(values, workspaceId, pathKeys);
@@ -207,7 +215,7 @@ export function useDiffReview(workspaceId: string) {
       });
     } catch (error) {
       setSnapshotError(error instanceof Error ? error.message : String(error));
-      setFiles([]);
+      setAllFiles([]);
     } finally {
       setLoadingSnapshot(false);
     }
@@ -217,9 +225,24 @@ export function useDiffReview(workspaceId: string) {
     void refreshSnapshot();
   }, [refreshSnapshot]);
 
+  useEffect(() => {
+    setSelectedPathKey((current) => {
+      if (current && files.some((file) => file.pathKey === current)) return current;
+      return files[0]?.pathKey ?? null;
+    });
+  }, [files]);
+
   const selectFile = useCallback((pathKey: string) => {
     setSelectedPathKey(pathKey);
   }, []);
+
+  const toggleRepo = useCallback(
+    (key: string) => {
+      if (!cwd) return;
+      void saveProgress((values) => withToggledRepo(values, cwd, key));
+    },
+    [cwd, saveProgress],
+  );
 
   const orderedFiles = useMemo(() => treeOrderedFiles(files), [files]);
 
@@ -407,7 +430,9 @@ export function useDiffReview(workspaceId: string) {
           includeFileLists,
           stage,
         });
-        await clearComments();
+        // Only sent files lose their comments; hidden repositories keep theirs.
+        const sentPathKeys = new Set(files.map((file) => file.pathKey));
+        await saveProgress((values) => clearWorkspaceComments(values, workspaceId, sentPathKeys));
         setStatusMessage(result.statusMessage);
         openAgent?.({ agentId: result.agentId });
         setSendNote("");
@@ -420,13 +445,13 @@ export function useDiffReview(workspaceId: string) {
       }
     },
     [
-      clearComments,
       cwd,
       files,
       includeFileLists,
       paseo,
       ready,
       refreshSnapshot,
+      saveProgress,
       sendNote,
       stage,
       workspace?.name,
@@ -439,6 +464,8 @@ export function useDiffReview(workspaceId: string) {
     workspace,
     settings,
     files,
+    repos,
+    toggleRepo,
     snapshotError,
     loadingSnapshot,
     selectedPathKey,

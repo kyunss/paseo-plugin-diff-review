@@ -72,15 +72,21 @@ export function workspaceHasComments(progress: Record<string, FileProgress>): bo
 }
 
 /** Remove file and line comments. Viewed and ignored marks stay. */
+/** Clears comments in a workspace, or only on `pathKeys` when given. */
 export function clearWorkspaceComments(
   values: ReviewSettingsValues,
   workspaceId: string,
+  pathKeys?: ReadonlySet<string>,
 ): ReviewSettingsValues {
   const workspace = values.progressByWorkspace[workspaceId];
   if (!workspace) return values;
   let changed = false;
   const files: Record<string, FileProgress> = {};
   for (const [pathKey, progress] of Object.entries(workspace.files)) {
+    if (pathKeys && !pathKeys.has(pathKey)) {
+      files[pathKey] = progress;
+      continue;
+    }
     const hasComment =
       Boolean(progress.fileComment?.trim()) ||
       progress.lineComments.some((comment) => comment.body.trim());

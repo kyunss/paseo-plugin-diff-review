@@ -87,6 +87,11 @@ export const reviewSettings = defineSettings({
         LEGACY_DEFAULT_PROMPT_TEMPLATES.has(value) ? DEFAULT_PROMPT_TEMPLATE : value,
       ),
     progressByWorkspace: z.record(z.string(), WorkspaceProgressSchema).default({}),
+    /**
+     * Repository keys (see `repoKeyOf`) hidden from the file list, per workspace directory so
+     * every session on the same checkout shares them.
+     */
+    hiddenReposByDirectory: z.record(z.string(), z.array(z.string())).default({}),
     diffTypography: DiffTypographySchema.default({
       fontSize: DEFAULT_DIFF_FONT_SIZE,
       lineHeight: DEFAULT_DIFF_LINE_HEIGHT,
