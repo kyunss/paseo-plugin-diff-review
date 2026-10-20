@@ -1,10 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RpcInput } from "@getpaseo/plugin";
-import { makePathKey } from "../shared/paths";
+import { displayPathForKey, makePathKey } from "../shared/paths";
 import type { DiffFile } from "../shared/rpc";
 import { diffSnapshotRpc } from "../shared/rpc";
-import { listDirtySubmodulePaths, resolveSubmoduleCwd, runGit } from "./git";
+import { listNestedRepos, runGit } from "./git";
 
 type NameStatus = DiffFile["status"];
 
@@ -129,51 +129,41 @@ export async function getDiffSnapshot(
   input: RpcInput<typeof diffSnapshotRpc>,
 ): Promise<{ files: DiffFile[]; error: string | null }> {
   try {
-    const parentFiles = await listRepoFiles(input.cwd, null);
-    const dirtySubs = await listDirtySubmodulePaths(input.cwd);
-    const nested: DiffFile[] = [];
-    for (const subPath of dirtySubs.sort()) {
-      const subCwd = resolveSubmoduleCwd(input.cwd, subPath);
-      if (!subCwd) {
-        nested.push({
-          pathKey: makePathKey({ submodulePath: subPath, path: "." }),
-          path: ".",
-          submodulePath: subPath,
-          kind: "submodule",
-          status: "modified",
-          additions: 0,
-          deletions: 0,
-        });
-        continue;
-      }
-      const childFiles = await listRepoFiles(subCwd, subPath);
-      if (childFiles.length === 0) {
-        nested.push({
-          pathKey: makePathKey({ submodulePath: subPath, path: "." }),
-          path: ".",
-          submodulePath: subPath,
-          kind: "submodule",
-          status: "modified",
-          additions: 0,
-          deletions: 0,
-        });
-        continue;
-      }
-      nested.push(...childFiles);
+    const nestedRepos = await listNestedRepos(input.cwd);
+    const groups = await Promise.all([
+      listRepoFiles(input.cwd, null),
+      ...nestedRepos.map((repo) => listRepoFiles(repo.cwd, repo.path)),
+    ]);
+    const rows = groups.flat();
+
+    // A nested checkout's gitlink/symlink row in its parent is replaced by the checkout's own
+    // file rows. When the parent reports the link changed but the checkout has no file
+    // changes (pointer moved), keep a placeholder row instead.
+    const expanded = new Set(nestedRepos.map((repo) => repo.path));
+    const reportedByParent = new Set(rows.map((file) => displayPathForKey(file.pathKey)));
+    const files = rows.filter((file) => !expanded.has(displayPathForKey(file.pathKey)));
+    const withFiles = new Set(files.map((file) => file.submodulePath));
+    for (const repo of nestedRepos) {
+      if (!reportedByParent.has(repo.path) || withFiles.has(repo.path)) continue;
+      files.push({
+        pathKey: makePathKey({ submodulePath: repo.path, path: "." }),
+        path: ".",
+        submodulePath: repo.path,
+        kind: "submodule",
+        status: "modified",
+        additions: 0,
+        deletions: 0,
+      });
     }
 
-    // Drop parent gitlink rows when we expanded nested content for that path.
-    const expanded = new Set(dirtySubs);
-    const files = [...parentFiles.filter((file) => !expanded.has(file.path)), ...nested].sort(
-      (left, right) => {
-        const leftGroup = left.submodulePath ?? "";
-        const rightGroup = right.submodulePath ?? "";
-        if (leftGroup !== rightGroup) return leftGroup < rightGroup ? -1 : 1;
-        if (left.path < right.path) return -1;
-        if (left.path > right.path) return 1;
-        return 0;
-      },
-    );
+    files.sort((left, right) => {
+      const leftGroup = left.submodulePath ?? "";
+      const rightGroup = right.submodulePath ?? "";
+      if (leftGroup !== rightGroup) return leftGroup < rightGroup ? -1 : 1;
+      if (left.path < right.path) return -1;
+      if (left.path > right.path) return 1;
+      return 0;
+    });
 
     return { files, error: null };
   } catch (error) {

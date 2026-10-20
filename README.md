@@ -1,8 +1,12 @@
 # Diff Review
 
-Review unstaged and untracked changes in a Paseo workspace (parent repo and dirty
-submodules), leave file and line comments, mark files viewed or ignored, then send the
+Review unstaged and untracked changes in a Paseo workspace (parent repo and nested
+checkouts), leave file and line comments, mark files viewed or ignored, then send the
 review to an agent. Viewed files with no comments are staged after send.
+
+Nested checkouts are found recursively (up to 4 levels): submodules, including those
+`.gitmodules` hides with `ignore = all`, and tracked symlinks that point at another Git
+checkout. Uninitialized submodules are skipped.
 
 Requires Paseo `>=0.11.0`. Plugins are unsandboxed: only install sources you trust.
 

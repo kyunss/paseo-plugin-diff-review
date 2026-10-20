@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { execCommand } from "@getpaseo/plugin/server";
 
@@ -44,41 +44,53 @@ export function resolveSubmoduleCwd(parentCwd: string, subPath: string): string 
   return subCwd;
 }
 
-export async function listDirtySubmodulePaths(cwd: string): Promise<string[]> {
-  const { stdout } = await runGit(cwd, ["status", "--porcelain=1"], { acceptExitCodes: [0] });
-  const candidates: string[] = [];
-  for (const line of stdout
-    .split("\n")
-    .map((entry) => entry.trimEnd())
-    .filter(Boolean)) {
-    if (line.length < 4) continue;
-    const indexStatus = line[0];
-    const worktreeStatus = line[1];
-    const dirty =
-      indexStatus === "m" ||
-      indexStatus === "M" ||
-      worktreeStatus === "m" ||
-      worktreeStatus === "M" ||
-      worktreeStatus === "?";
-    if (!dirty) continue;
-    const pathField = line.slice(3);
-    const path = pathField.includes(" -> ")
-      ? (pathField.split(" -> ").at(-1) ?? pathField)
-      : pathField;
-    if (path) candidates.push(path);
-  }
-  if (candidates.length === 0) return [];
+export type NestedRepo = {
+  /** Workspace-relative checkout path; used as `submodulePath` in path keys. */
+  path: string;
+  cwd: string;
+};
 
-  const { stdout: lsOut } = await runGit(cwd, ["ls-files", "-s", "--", ...candidates], {
-    acceptExitCodes: [0],
-  });
-  const gitlinks: string[] = [];
-  for (const line of lsOut
-    .split("\n")
-    .map((entry) => entry.trimEnd())
-    .filter(Boolean)) {
-    const match = line.match(/^160000 [0-9a-f]+ \d+\t(.+)$/);
-    if (match?.[1]) gitlinks.push(match[1]);
+const MAX_NESTED_DEPTH = 4;
+
+/**
+ * Initialized nested repositories under a workspace, outermost first: submodules (also
+ * those `.gitmodules` hides with `ignore = all`), submodules of submodules, and tracked
+ * symlinks that point at another Git checkout.
+ */
+export async function listNestedRepos(rootCwd: string): Promise<NestedRepo[]> {
+  const repos: NestedRepo[] = [];
+  const visited = new Set([realpathSync(rootCwd)]);
+  await collectNestedRepos(rootCwd, "", 1, visited, repos);
+  return repos;
+}
+
+async function collectNestedRepos(
+  repoCwd: string,
+  prefix: string,
+  depth: number,
+  visited: Set<string>,
+  out: NestedRepo[],
+): Promise<void> {
+  if (depth > MAX_NESTED_DEPTH) return;
+  const { stdout } = await runGit(repoCwd, ["ls-files", "-s", "-z"], { acceptExitCodes: [0] });
+  const children: NestedRepo[] = [];
+  for (const entry of stdout.split("\0").filter(Boolean)) {
+    // Gitlinks are submodules; symlinks only count when their target is a checkout.
+    const match = entry.match(/^(?:160000|120000) [0-9a-f]+ \d+\t(.+)$/);
+    if (!match?.[1]) continue;
+    const cwd = resolveSubmoduleCwd(repoCwd, match[1]);
+    if (!cwd) continue;
+    const real = realpathSync(cwd);
+    if (visited.has(real)) continue;
+    visited.add(real);
+    children.push({ path: prefix ? `${prefix}/${match[1]}` : match[1], cwd });
   }
-  return gitlinks;
+  const subtrees = await Promise.all(
+    children.map(async (child) => {
+      const subtree = [child];
+      await collectNestedRepos(child.cwd, child.path, depth + 1, visited, subtree);
+      return subtree;
+    }),
+  );
+  out.push(...subtrees.flat());
 }
