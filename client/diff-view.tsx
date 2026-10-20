@@ -83,199 +83,41 @@ type ScrollAlign = "nearest" | "start" | "end" | "pin";
 /**
  * Line marker kept outside React state. A j/k repeat must not re-render the file:
  * rows subscribe here and bail out unless their own cursor or selection bit changes.
+ * A factory, not a class: the mobile apps' Hermes engine drops a plugin client bundle that
+ * contains `class` syntax (getpaseo/paseo#5783).
  */
-class LineCursorStore {
-  cursorId: string | null = null;
-  visualAnchorId: string | null = null;
-  scrollAlign: ScrollAlign = "nearest";
-  /** Viewport offset, in px, used when `scrollAlign` is `pin`. */
-  scrollPin = 0;
-  scrollSeq = 0;
-  lines: readonly DisplayLine[] = [];
-  selectableIds: string[] = [];
-  private indexById = new Map<string, number>();
-  private selected = new Set<string>();
-  private marks = new Map<string, LineMark>();
-  private listeners = new Map<string, Set<() => void>>();
-  private subscribeFns = new Map<string, (listener: () => void) => () => void>();
-  private scrollListeners = new Set<() => void>();
+function createLineCursorStore() {
+  let lines: readonly DisplayLine[] = [];
+  let indexById = new Map<string, number>();
+  let selected = new Set<string>();
+  const marks = new Map<string, LineMark>();
+  const listeners = new Map<string, Set<() => void>>();
+  const subscribeFns = new Map<string, (listener: () => void) => () => void>();
+  const scrollListeners = new Set<() => void>();
 
-  /** Stable per line id so a row subscribes once, not on every parent render. */
-  subscribeFor(id: string): (listener: () => void) => () => void {
-    const existing = this.subscribeFns.get(id);
-    if (existing) return existing;
-    const subscribe = (listener: () => void) => {
-      let bucket = this.listeners.get(id);
-      if (!bucket) {
-        bucket = new Set();
-        this.listeners.set(id, bucket);
-      }
-      const active = bucket;
-      active.add(listener);
-      return () => {
-        active.delete(listener);
-        if (active.size === 0) this.listeners.delete(id);
-      };
-    };
-    this.subscribeFns.set(id, subscribe);
-    return subscribe;
-  }
-
-  subscribeScroll = (listener: () => void) => {
-    this.scrollListeners.add(listener);
-    return () => {
-      this.scrollListeners.delete(listener);
-    };
+  const emitIds = (ids: Iterable<string>) => {
+    for (const id of ids) {
+      const bucket = listeners.get(id);
+      if (!bucket) continue;
+      for (const listener of bucket) listener();
+    }
   };
 
-  mark(id: string): LineMark {
-    const cursor = this.cursorId === id;
-    const selected = this.selected.has(id);
-    if (!cursor && !selected) return IDLE_MARK;
-    const prev = this.marks.get(id);
-    if (prev && prev.cursor === cursor && prev.selected === selected) return prev;
-    const next = { cursor, selected };
-    this.marks.set(id, next);
-    return next;
-  }
-
-  syncLines(lines: readonly DisplayLine[]) {
-    if (this.lines === lines) return;
-    this.lines = lines;
-    this.selectableIds = [];
-    this.indexById = new Map();
-    for (const line of lines) {
-      if (!isSelectableLine(line)) continue;
-      this.indexById.set(line.id, this.selectableIds.length);
-      this.selectableIds.push(line.id);
+  const emitAll = () => {
+    for (const bucket of listeners.values()) {
+      for (const listener of bucket) listener();
     }
-    const prevCursor = this.cursorId;
-    const prevSelected = this.selected;
-    if (this.cursorId != null && !this.indexById.has(this.cursorId)) this.cursorId = null;
-    if (this.visualAnchorId != null && !lines.some((line) => line.id === this.visualAnchorId)) {
-      this.visualAnchorId = null;
-    }
-    if (this.visualAnchorId) this.rebuildSelected();
-    else if (this.selected.size > 0) this.selected = new Set();
-    const dirty = this.diffIds(prevSelected, this.selected, null);
-    if (prevCursor && prevCursor !== this.cursorId) dirty.add(prevCursor);
-    if (this.cursorId && prevCursor !== this.cursorId) dirty.add(this.cursorId);
-    if (dirty.size > 0) this.emitIds(dirty);
-  }
+  };
 
-  reset() {
-    const dirty = this.cursorId != null || this.visualAnchorId != null || this.selected.size > 0;
-    this.cursorId = null;
-    this.visualAnchorId = null;
-    this.selected = new Set();
-    this.marks.clear();
-    this.scrollAlign = "nearest";
-    this.scrollPin = 0;
-    if (dirty) this.emitAll();
-  }
+  const emitScroll = () => {
+    for (const listener of scrollListeners) listener();
+  };
 
-  currentId(): string | null {
-    if (this.cursorId != null && this.indexById.has(this.cursorId)) return this.cursorId;
-    return this.selectableIds[0] ?? null;
-  }
-
-  move(delta: number) {
-    const ids = this.selectableIds;
-    if (ids.length === 0) return;
-    const index = this.cursorId != null ? this.indexById.get(this.cursorId) : undefined;
-    const from = index == null ? 0 : index;
-    const next = Math.min(ids.length - 1, Math.max(0, from + delta));
-    this.commitCursor(ids[next]!, "nearest");
-  }
-
-  jump(edge: "start" | "end") {
-    const ids = this.selectableIds;
-    if (ids.length === 0) return;
-    const id = edge === "start" ? ids[0]! : ids[ids.length - 1]!;
-    this.commitCursor(id, edge);
-  }
-
-  /** Moves the marker to `id` and keeps it `pin` pixels below the viewport top. */
-  placePinned(id: string, pin: number) {
-    this.scrollPin = pin;
-    this.commitCursor(id, "pin");
-  }
-
-  focusLine(id: string) {
-    const prevSelected = this.selected;
-    this.visualAnchorId = null;
-    this.selected = new Set();
-    this.commitCursor(id, "nearest");
-    if (prevSelected.size > 0) this.emitIds(prevSelected);
-  }
-
-  toggleVisual() {
-    if (this.visualAnchorId) {
-      this.clearVisual();
-      return;
-    }
-    const id = this.currentId();
-    if (!id) return;
-    const prevCursor = this.cursorId;
-    this.cursorId = id;
-    this.visualAnchorId = id;
-    this.rebuildSelected();
-    this.scrollAlign = "nearest";
-    this.scrollSeq += 1;
-    const dirty = new Set<string>(this.selected);
-    if (prevCursor) dirty.add(prevCursor);
-    this.emitIds(dirty);
-    this.emitScroll();
-  }
-
-  clearVisual() {
-    if (!this.visualAnchorId && this.selected.size === 0) return;
-    const prevSelected = this.selected;
-    this.visualAnchorId = null;
-    this.selected = new Set();
-    this.emitIds(prevSelected);
-  }
-
-  private commitCursor(id: string | null, align: ScrollAlign) {
-    const prevCursor = this.cursorId;
-    const prevSelected = this.selected;
-    this.cursorId = id;
-    if (this.visualAnchorId) this.rebuildSelected();
-    this.scrollAlign = align;
-    this.scrollSeq += 1;
-    const dirty = new Set<string>();
-    if (prevCursor) dirty.add(prevCursor);
-    if (id) dirty.add(id);
-    if (prevSelected !== this.selected) {
-      for (const lineId of prevSelected) {
-        if (!this.selected.has(lineId)) dirty.add(lineId);
-      }
-      for (const lineId of this.selected) {
-        if (!prevSelected.has(lineId)) dirty.add(lineId);
-      }
-    }
-    this.emitIds(dirty);
-    this.emitScroll();
-  }
-
-  private rebuildSelected() {
-    const next = new Set<string>();
-    if (this.visualAnchorId && this.cursorId) {
-      const range = rangeBetween(this.lines, this.visualAnchorId, this.cursorId);
-      if (range) {
-        for (const line of this.lines) {
-          if (lineInRange(line, range)) next.add(line.id);
-        }
-      }
-    }
-    this.selected = next;
-  }
-
-  private diffIds(
+  const diffIds = (
     prevSelected: ReadonlySet<string>,
     nextSelected: ReadonlySet<string>,
     cursorId: string | null,
-  ): Set<string> {
+  ): Set<string> => {
     const dirty = new Set<string>();
     if (cursorId) dirty.add(cursorId);
     for (const lineId of prevSelected) {
@@ -285,26 +127,195 @@ class LineCursorStore {
       if (!prevSelected.has(lineId)) dirty.add(lineId);
     }
     return dirty;
-  }
+  };
 
-  private emitIds(ids: Iterable<string>) {
-    for (const id of ids) {
-      const bucket = this.listeners.get(id);
-      if (!bucket) continue;
-      for (const listener of bucket) listener();
+  const rebuildSelected = () => {
+    const next = new Set<string>();
+    if (store.visualAnchorId && store.cursorId) {
+      const range = rangeBetween(lines, store.visualAnchorId, store.cursorId);
+      if (range) {
+        for (const line of lines) {
+          if (lineInRange(line, range)) next.add(line.id);
+        }
+      }
     }
-  }
+    selected = next;
+  };
 
-  private emitAll() {
-    for (const bucket of this.listeners.values()) {
-      for (const listener of bucket) listener();
+  const commitCursor = (id: string | null, align: ScrollAlign) => {
+    const prevCursor = store.cursorId;
+    const prevSelected = selected;
+    store.cursorId = id;
+    if (store.visualAnchorId) rebuildSelected();
+    store.scrollAlign = align;
+    store.scrollSeq += 1;
+    const dirty = new Set<string>();
+    if (prevCursor) dirty.add(prevCursor);
+    if (id) dirty.add(id);
+    if (prevSelected !== selected) {
+      for (const lineId of prevSelected) {
+        if (!selected.has(lineId)) dirty.add(lineId);
+      }
+      for (const lineId of selected) {
+        if (!prevSelected.has(lineId)) dirty.add(lineId);
+      }
     }
-  }
+    emitIds(dirty);
+    emitScroll();
+  };
 
-  private emitScroll() {
-    for (const listener of this.scrollListeners) listener();
-  }
+  const store = {
+    cursorId: null as string | null,
+    visualAnchorId: null as string | null,
+    scrollAlign: "nearest" as ScrollAlign,
+    /** Viewport offset, in px, used when `scrollAlign` is `pin`. */
+    scrollPin: 0,
+    scrollSeq: 0,
+    selectableIds: [] as string[],
+
+    /** Stable per line id so a row subscribes once, not on every parent render. */
+    subscribeFor(id: string): (listener: () => void) => () => void {
+      const existing = subscribeFns.get(id);
+      if (existing) return existing;
+      const subscribe = (listener: () => void) => {
+        let bucket = listeners.get(id);
+        if (!bucket) {
+          bucket = new Set();
+          listeners.set(id, bucket);
+        }
+        const active = bucket;
+        active.add(listener);
+        return () => {
+          active.delete(listener);
+          if (active.size === 0) listeners.delete(id);
+        };
+      };
+      subscribeFns.set(id, subscribe);
+      return subscribe;
+    },
+
+    subscribeScroll(listener: () => void) {
+      scrollListeners.add(listener);
+      return () => {
+        scrollListeners.delete(listener);
+      };
+    },
+
+    mark(id: string): LineMark {
+      const cursor = store.cursorId === id;
+      const isSelected = selected.has(id);
+      if (!cursor && !isSelected) return IDLE_MARK;
+      const prev = marks.get(id);
+      if (prev && prev.cursor === cursor && prev.selected === isSelected) return prev;
+      const next = { cursor, selected: isSelected };
+      marks.set(id, next);
+      return next;
+    },
+
+    syncLines(nextLines: readonly DisplayLine[]) {
+      if (lines === nextLines) return;
+      lines = nextLines;
+      store.selectableIds = [];
+      indexById = new Map();
+      for (const line of nextLines) {
+        if (!isSelectableLine(line)) continue;
+        indexById.set(line.id, store.selectableIds.length);
+        store.selectableIds.push(line.id);
+      }
+      const prevCursor = store.cursorId;
+      const prevSelected = selected;
+      if (store.cursorId != null && !indexById.has(store.cursorId)) store.cursorId = null;
+      if (
+        store.visualAnchorId != null &&
+        !nextLines.some((line) => line.id === store.visualAnchorId)
+      ) {
+        store.visualAnchorId = null;
+      }
+      if (store.visualAnchorId) rebuildSelected();
+      else if (selected.size > 0) selected = new Set();
+      const dirty = diffIds(prevSelected, selected, null);
+      if (prevCursor && prevCursor !== store.cursorId) dirty.add(prevCursor);
+      if (store.cursorId && prevCursor !== store.cursorId) dirty.add(store.cursorId);
+      if (dirty.size > 0) emitIds(dirty);
+    },
+
+    reset() {
+      const dirty = store.cursorId != null || store.visualAnchorId != null || selected.size > 0;
+      store.cursorId = null;
+      store.visualAnchorId = null;
+      selected = new Set();
+      marks.clear();
+      store.scrollAlign = "nearest";
+      store.scrollPin = 0;
+      if (dirty) emitAll();
+    },
+
+    currentId(): string | null {
+      if (store.cursorId != null && indexById.has(store.cursorId)) return store.cursorId;
+      return store.selectableIds[0] ?? null;
+    },
+
+    move(delta: number) {
+      const ids = store.selectableIds;
+      if (ids.length === 0) return;
+      const index = store.cursorId != null ? indexById.get(store.cursorId) : undefined;
+      const from = index == null ? 0 : index;
+      const next = Math.min(ids.length - 1, Math.max(0, from + delta));
+      commitCursor(ids[next]!, "nearest");
+    },
+
+    jump(edge: "start" | "end") {
+      const ids = store.selectableIds;
+      if (ids.length === 0) return;
+      const id = edge === "start" ? ids[0]! : ids[ids.length - 1]!;
+      commitCursor(id, edge);
+    },
+
+    /** Moves the marker to `id` and keeps it `pin` pixels below the viewport top. */
+    placePinned(id: string, pin: number) {
+      store.scrollPin = pin;
+      commitCursor(id, "pin");
+    },
+
+    focusLine(id: string) {
+      const prevSelected = selected;
+      store.visualAnchorId = null;
+      selected = new Set();
+      commitCursor(id, "nearest");
+      if (prevSelected.size > 0) emitIds(prevSelected);
+    },
+
+    toggleVisual() {
+      if (store.visualAnchorId) {
+        store.clearVisual();
+        return;
+      }
+      const id = store.currentId();
+      if (!id) return;
+      const prevCursor = store.cursorId;
+      store.cursorId = id;
+      store.visualAnchorId = id;
+      rebuildSelected();
+      store.scrollAlign = "nearest";
+      store.scrollSeq += 1;
+      const dirty = new Set<string>(selected);
+      if (prevCursor) dirty.add(prevCursor);
+      emitIds(dirty);
+      emitScroll();
+    },
+
+    clearVisual() {
+      if (!store.visualAnchorId && selected.size === 0) return;
+      const prevSelected = selected;
+      store.visualAnchorId = null;
+      selected = new Set();
+      emitIds(prevSelected);
+    },
+  };
+  return store;
 }
+
+type LineCursorStore = ReturnType<typeof createLineCursorStore>;
 
 type ScrollEl = {
   getBoundingClientRect?: () => { top: number; bottom: number };
@@ -582,7 +593,7 @@ function WebDiffView({
   useScrollComposerIntoView(scrollRef, contentRef, composerRef, composerScrollKey);
   const [fileCommentOpen, setFileCommentOpen] = useState(false);
   const cursorStoreRef = useRef<LineCursorStore | null>(null);
-  if (cursorStoreRef.current == null) cursorStoreRef.current = new LineCursorStore();
+  if (cursorStoreRef.current == null) cursorStoreRef.current = createLineCursorStore();
   const cursorStore = cursorStoreRef.current;
   const rowNodes = useRef(new Map<string, RowNode>());
   const rowRefCallbacks = useRef(new Map<string, (node: RowNode | null) => void>());
