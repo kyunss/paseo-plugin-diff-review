@@ -239,9 +239,16 @@ export function useDiffReview(workspaceId: string) {
   const toggleRepo = useCallback(
     (key: string) => {
       if (!cwd) return;
-      void saveProgress((values) => withToggledRepo(values, cwd, key));
+      const showing = hiddenRepos.has(key);
+      void (async () => {
+        const ok = await saveProgress((values) => withToggledRepo(values, cwd, key));
+        if (!ok || !showing) return;
+        // Hiding moved the selection elsewhere; showing a repository again opens its first file.
+        const first = treeOrderedFiles(allFiles).find((file) => repoKeyOf(file) === key);
+        if (first) setSelectedPathKey(first.pathKey);
+      })();
     },
-    [cwd, saveProgress],
+    [allFiles, cwd, hiddenRepos, saveProgress],
   );
 
   const orderedFiles = useMemo(() => treeOrderedFiles(files), [files]);
