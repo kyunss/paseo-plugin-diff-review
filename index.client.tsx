@@ -28,6 +28,27 @@ export default function contribute(client: PluginClientContext) {
       openPanel("diff-review");
     },
   });
+  // Side by side with the agent: the Explorer dock is the only other place a plugin can open a panel.
+  client.addCommandCenterItem({
+    id: "open-diff-review-beside",
+    title: "Open Diff Review beside",
+    icon: "PanelRight",
+    context: "workspace",
+    keywords: ["diff", "review", "side", "split", "explorer"],
+    onSelect({ openPanel }) {
+      openPanel("diff-review", { location: "explorer" });
+    },
+  });
+  // Not "/diff": plugin commands outrank provider commands and would hide Codex's /diff.
+  client.addSlashCommand({
+    name: "diff-review",
+    description: "Open Diff Review beside the conversation",
+    argumentHint: "",
+    context: "workspace",
+    onSubmit({ openPanel }) {
+      openPanel("diff-review", { location: "explorer" });
+    },
+  });
   client.addCommandCenterItem({
     id: "diff-review-settings",
     title: "Configure Diff Review prompt",

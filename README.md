@@ -42,6 +42,8 @@ host settings, so every client on that daemon shares the same review state.
 1. Open the **Diff Review** workspace panel with its header button (desktop), the
    **Diff Review** pill above an agent's composer (phones), or Command Center →
    **Open Diff Review**. Paseo 0.12 shows no plugin header buttons on phones.
+   To keep the conversation visible, use Command Center → **Open Diff Review beside** or type
+   `/diff-review` in the composer; both open the panel in the Explorer dock.
 2. Pick a file in the left tree (`+` / `−` / `±` = add-only / delete-only / mixed).
 3. File header:
    - **Viewed** — mark done and advance to the next unfinished file
