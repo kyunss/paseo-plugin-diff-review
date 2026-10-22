@@ -26,7 +26,8 @@ export function contributeComposerPills(client: PluginClientContext): () => void
         behavior: {
           kind: "action",
           onPress() {
-            client.openPanel("diff-review", { workspaceId, agentId: agent.id });
+            // The panel is workspace-scoped; an agentId would make Paseo look for an agent panel.
+            client.openPanel("diff-review", { workspaceId });
           },
         },
       },
